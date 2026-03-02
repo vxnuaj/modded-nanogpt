@@ -740,13 +740,7 @@ class NorMuonAndAdam:
 
             chunk_size = reshape[0] // self.world_size
             chunk_shape = (chunk_size, *reshape[1:])
-            # Shape-based LR multiplier for NorMuon
-            shape_mult = (
-                max(1.0, chunk_shape[-2] / chunk_shape[-1]) ** 0.5
-                if len(chunk_shape) >= 2
-                else 1.0
-            )
-            lr_mul = shape_mult * lr_mul
+            # Note: Shape-based LR multiplier removed - LITE provides adaptive amplification
 
             # Per-matrix LR multipliers for MLP c_proj (2x LR on odd indices)
             per_matrix_lr_mul = None
@@ -758,6 +752,17 @@ class NorMuonAndAdam:
                     global_idx = start_idx + i
                     is_c_proj = global_idx % 2 == 1
                     per_matrix_lr_mul.append(2.0 if is_c_proj else 1.0)
+
+            # Get LITE configuration from table_entry or use defaults
+            subspace_ratio = table_entry.get(
+                "subspace_ratio", self.normuon_defaults.get("subspace_ratio", 0.1)
+            )
+            lr_ratio = table_entry.get(
+                "lr_ratio", self.normuon_defaults.get("lr_ratio", 1.0)
+            )
+            flat_warmup = table_entry.get(
+                "flat_warmup", self.normuon_defaults.get("flat_warmup", 0)
+            )
 
             p_cfg = ParamConfig(
                 label=label,
@@ -774,6 +779,9 @@ class NorMuonAndAdam:
                 momentum=self.normuon_defaults["momentum"],
                 beta2=self.normuon_defaults["beta2"],
                 per_matrix_lr_mul=per_matrix_lr_mul,
+                subspace_ratio=subspace_ratio,
+                lr_ratio=lr_ratio,
+                flat_warmup=flat_warmup,
             )
         else:
             raise ValueError(f"Unknown optim type: {optim}")
@@ -2446,8 +2454,26 @@ class TrainingManager:
         # - "sharded" parameters use reduce_scatter/all_gather and "replicated" ones use all_reduce
         # - lr_mul and wd_mul are per-parameter learning rate and weight decay multipliers
         self.param_table = {
-            "attn_bank": {"optim": "normuon", "comms": "sharded", "adam_betas": None},
-            "mlp_bank": {"optim": "normuon", "comms": "sharded", "adam_betas": None},
+            # Attention layers with LITE configuration
+            "attn_bank": {
+                "optim": "normuon",
+                "comms": "sharded",
+                "adam_betas": None,
+                # LITE settings for attention (QK and VO projections)
+                "subspace_ratio": 0.1,  # 10% sharp subspace
+                "lr_ratio": 1.5,  # 1.5x amplification in flat directions
+                "flat_warmup": 1,  # Gradual warmup
+            },
+            # MLP layers with LITE configuration
+            "mlp_bank": {
+                "optim": "normuon",
+                "comms": "sharded",
+                "adam_betas": None,
+                # LITE settings for FFN layers
+                "subspace_ratio": 0.1,  # 10% sharp subspace
+                "lr_ratio": 2.0,  # 2x amplification (FFN often has flatter directions)
+                "flat_warmup": 1,  # Gradual warmup
+            },
             "scalars": {
                 "optim": "adam",
                 "comms": "replicated",
@@ -2566,6 +2592,12 @@ class TrainingManager:
             momentum=0.95,
             beta2=0.95,
             weight_decay=1.2,
+            # LITE hyperparameters
+            beta1=0.0,  # Base Hessian damping coefficient
+            subspace_ratio=0.1,  # Sharp subspace dimension ratio (10%)
+            lr_ratio=1.5,  # Flat-direction LR amplification
+            flat_warmup=1,  # Gradual warmup mode (0=none, 1=gradual, 2=cosine)
+            T_flat_warmup=0.5,  # Fraction of training for flat warmup (0.5 = 50%)
         )
 
         self.optimizer = NorMuonAndAdam(
