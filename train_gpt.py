@@ -222,111 +222,31 @@ def beta_scheduler(
         return beta_final
 
 
-@torch.compile(
-    dynamic=False, fullgraph=True
-)  # Must use dynamic=False or else it's much slower
-def polar_express(
-    grad_chunk: torch.Tensor,
-    momentum_buffer: torch.Tensor,
-    momentum_t: torch.Tensor,
-    split_baddbmm: bool = False,
-    return_momentum: bool = False,
-):
-    """
-    Fused Nesterov momentum + Polar Express Sign Method.
-    Nesterov momentum is applied in FP32, then the result is cast to BF16 for polar express
-    orthogonalization, avoiding materialization of the FP32 intermediate between graph breaks.
-
-    Polar Express: https://arxiv.org/pdf/2505.16932
-    by Noah Amsel, David Persson, Christopher Musco, Robert M. Gower.
-
-    momentum_t is a 0-D CPU tensor to avoid triggering graph recompilations when the value changes.
+def cosine_lr_schedule(
+    step: int, warmup: int, max_steps: int, lr_init: float, lr_final: float
+) -> float:
+    """Cosine learning rate schedule with warmup.
 
     Args:
-        grad_chunk: Gradient chunk
-        momentum_buffer: Momentum buffer (updated in-place)
-        momentum_t: Momentum coefficient (0-D CPU tensor)
-        split_baddbmm: Whether to split baddbmm for large matrices
-        return_momentum: If True, also return Nesterov momentum before orthogonalization
+        step: Current step
+        warmup: Warmup steps (linear ramp from 0 to lr_init)
+        max_steps: Total training steps
+        lr_init: Initial learning rate after warmup
+        lr_final: Final learning rate at max_steps
 
     Returns:
-        X: Orthogonalized matrix
-        M (optional): Nesterov momentum before orthogonalization (if return_momentum=True)
+        Learning rate for current step
     """
-    # Nesterov momentum (in FP32)
-    momentum = momentum_t.to(grad_chunk.dtype)
-    momentum_buffer.lerp_(grad_chunk, 1 - momentum)
-    g = grad_chunk.lerp_(momentum_buffer, momentum)
-
-    # Store momentum for LITE if requested
-    M = g.clone() if return_momentum else None
-
-    X = g.bfloat16()
-    is_tall = g.size(-2) > g.size(-1)
-
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * (1 + 2e-2) + 1e-6)
-
-    X = X.contiguous()
-
-    if is_tall:
-        # Tall: use Triton kernels with X^T @ X (small) and right multiplication
-        A = torch.empty(
-            (*X.shape[:-2], X.size(-1), X.size(-1)), device=X.device, dtype=X.dtype
-        )
-        B = torch.empty_like(A)
-        C = torch.empty_like(X)
-
-        # Select batched vs unbatched
-        if split_baddbmm:
-            XB_matmul = torch.bmm if X.ndim > 2 else torch.mm
-        else:
-            aX_plus_XB = torch.baddbmm if X.ndim > 2 else torch.addmm
-
-        # Perform the iterations
-        for a, b, c in polar_express_coeffs:
-            XTX(X, out=A)  # A = X.T @ X
-            ba_plus_cAA(A, alpha=c, beta=b, out=B)  # B = b*A + c*(A@A)
-
-            # Referencing X twice causes pytorch to make a defensive copy,
-            # resulting in a cudaMemcpyAsync in baddbmm.
-            # For large matrices (i.e., the mlp weights), it's faster to split
-            # the operation into two kernels to avoid this.
-            if split_baddbmm:
-                XB_matmul(X, B, out=C)  # C = X @ B
-                C.add_(X, alpha=a)  # C = C + a*X  (in-place, X only read)
-            else:
-                aX_plus_XB(X, X, B, beta=a, out=C)  # C = a * X + X @ B
-
-            X, C = C, X  # Swap references to avoid unnecessary copies
+    if step < warmup:
+        # Linear warmup
+        return lr_init * (step / warmup)
+    elif step >= max_steps:
+        return lr_final
     else:
-        # Wide: use Triton kernels with X @ X^T (small) and left multiplication
-        A = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
-        B = torch.empty_like(A)
-        C = torch.empty_like(X)
-
-        # Select batched vs unbatched
-        if split_baddbmm:
-            BX_matmul = torch.bmm if X.ndim > 2 else torch.mm
-        else:
-            aX_plus_BX = torch.baddbmm if X.ndim > 2 else torch.addmm
-
-        # Perform the iterations
-        for a, b, c in polar_express_coeffs:
-            XXT(X, out=A)  # A = X @ X.mT
-            ba_plus_cAA(A, alpha=c, beta=b, out=B)  # B = b * A + c * A @ A
-
-            if split_baddbmm:
-                BX_matmul(B, X, out=C)  # C = B @ X
-                C.add_(X, alpha=a)  # C = C + a*X  (in-place, X only read)
-            else:
-                aX_plus_BX(X, B, X, beta=a, out=C)  # C = a * X + B @ X
-
-            X, C = C, X  # Swap references to avoid unnecessary copies
-
-    if return_momentum:
-        return X, M
-    return X
+        # Cosine decay
+        progress = (step - warmup) / (max_steps - warmup)
+        cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+        return lr_final + (lr_init - lr_final) * cosine_decay
 
 
 @torch.compile(dynamic=False, fullgraph=True)
