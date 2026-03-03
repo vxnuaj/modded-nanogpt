@@ -596,14 +596,8 @@ class MuonPlusAndAdam:
                 )
 
             chunk_size = reshape[0] // self.world_size
-            chunk_shape = (chunk_size, *reshape[1:])
-            # Shape-based LR multiplier for Muon+
-            shape_mult = (
-                max(1.0, chunk_shape[-2] / chunk_shape[-1]) ** 0.5
-                if len(chunk_shape) >= 2
-                else 1.0
-            )
-            lr_mul = shape_mult * lr_mul
+            # Note: Shape scaling is applied in _muon_plus_update, not here
+            # This matches the paper's update rule: W = W - η * √(m/n) * O_t
 
             # Per-matrix LR multipliers for MLP c_proj (2x LR on odd indices)
             per_matrix_lr_mul = None
@@ -1005,11 +999,11 @@ class MuonPlusAndAdam:
         # 4. NEW: Post-polar normalization (Muon+ core)
         u = apply_post_polar_norm(u, p_cfg.norm_mode, eps=1e-7)
 
-        # 5. Shape scaling: √(m/n) for dimensional stability
+        # 5. Shape scaling: √(m/n) applied to update (not LR)
+        # This matches paper: W = W - η * √(m/n) * O_t
         if p_cfg.rms_scaling:
             m, n = u.shape[-2], u.shape[-1]
-            if m > n:
-                u = u * math.sqrt(m / n)
+            u = u * math.sqrt(max(m, n) / min(m, n))
 
         # 6. Get parameter slice for update
         param_view = param.data.view(p_cfg.reshape)
@@ -2220,7 +2214,7 @@ class TrainingManager:
         )
 
         muon_plus_defaults = dict(
-            lr=0.03,  # Paper optimal range (0.02-0.04)
+            lr=0.02,  # Lower LR with normalized updates (was 0.023 for NorMuon)
             momentum=0.95,
             norm_mode="col_row",  # Best per paper (27.64 PPL)
             rms_scaling=True,  # Enable shape scaling sqrt(m/n)
