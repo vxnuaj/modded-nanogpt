@@ -329,8 +329,7 @@ def polar_express(
     return X
 
 
-# NOTE: torch.compile removed due to performance degradation over time
-# @torch.compile(dynamic=False, fullgraph=True)
+@torch.compile(dynamic=False, fullgraph=True)
 @torch.no_grad()
 def mproj(m: torch.Tensor, msign_m: torch.Tensor, steps: int) -> torch.Tensor:
     """LITE subspace projection: project onto sharp subspace (eigenval > threshold).
@@ -411,8 +410,7 @@ def rank_v(
     return new_top_ratio, new_lower_ratio, result
 
 
-# NOTE: torch.compile removed due to performance degradation over time
-# @torch.compile(dynamic=False, fullgraph=True)
+@torch.compile(dynamic=False, fullgraph=True)
 @torch.no_grad()
 def lite_process(
     m_ns: torch.Tensor,
@@ -2710,6 +2708,10 @@ class TrainingManager:
         step_lr = training_schedule.get_lr(step)
         muon_momentum = get_muon_momentum(step)
         do_adam = self._is_adam_step(step)
+
+        # Set optimizer iteration counters for LITE scheduling
+        self.optimizer.iter = step
+        self.optimizer.max_iter = training_schedule.total_steps
 
         # Update learning rates and momentum for all params
         for param, p_cfg in self.optimizer.param_cfgs.items():
