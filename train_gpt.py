@@ -329,7 +329,8 @@ def polar_express(
     return X
 
 
-@torch.compile(dynamic=False, fullgraph=True)
+# NOTE: torch.compile removed due to performance degradation over time
+# @torch.compile(dynamic=False, fullgraph=True)
 @torch.no_grad()
 def mproj(m: torch.Tensor, msign_m: torch.Tensor, steps: int) -> torch.Tensor:
     """LITE subspace projection: project onto sharp subspace (eigenval > threshold).
@@ -410,7 +411,8 @@ def rank_v(
     return new_top_ratio, new_lower_ratio, result
 
 
-@torch.compile(dynamic=False, fullgraph=True)
+# NOTE: torch.compile removed due to performance degradation over time
+# @torch.compile(dynamic=False, fullgraph=True)
 @torch.no_grad()
 def lite_process(
     m_ns: torch.Tensor,
