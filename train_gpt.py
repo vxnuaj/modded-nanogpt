@@ -1003,14 +1003,16 @@ class MuonPlusAndAdam:
         # Reshape for batch processing if needed
         if g.ndim > 2:
             g_reshaped = g.view(-1, g.shape[-1])
+            buf_reshaped = p_state["momentum_buffer"].view(-1, g.shape[-1])
         else:
             g_reshaped = g
+            buf_reshaped = p_state["momentum_buffer"]
 
         # Fused Nesterov momentum + Polar Express orthogonalization
         is_large_matrix = chunk_shape[-2] > 1024
         u = polar_express(
             g_reshaped,
-            p_state["momentum_buffer"],
+            buf_reshaped,
             torch.tensor(p_cfg.momentum, dtype=torch.float32, device="cpu"),
             split_baddbmm=is_large_matrix,
         )
