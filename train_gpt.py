@@ -442,7 +442,7 @@ class ParamConfig:
     reshape: tuple | None = None
     chunk_size: int | None = None
     momentum: float | None = None
-    norm_mode: str = "col_row"  # "none", "col", "row", "col_row", "row_col"
+    norm_mode: str = "row_col"  # "none", "col", "row", "col_row", "row_col"
     rms_scaling: bool = True  # Enable shape scaling sqrt(m/n)
     per_matrix_lr_mul: list[float] | None = None
     # Deprecated: kept for backwards compatibility
@@ -997,7 +997,7 @@ class MuonPlusAndAdam:
         )
 
         # 4. NEW: Post-polar normalization (Muon+ core)
-        u = apply_post_polar_norm(u, p_cfg.norm_mode, eps=1e-7)
+        u = apply_post_polar_norm(u, p_cfg.norm_mode, eps=1e-8)
 
         # 5. Shape scaling: compute multiplier (will apply to LR, not update)
         # Reference Muon+ applies √(m/n) to LR: adjusted_lr = lr * √(m/n)
@@ -2220,7 +2220,7 @@ class TrainingManager:
         )
 
         muon_plus_defaults = dict(
-            lr=0.012,  # Lower LR with normalized updates (was 0.023 for NorMuon)
+            lr=0.01,  # Match Muon+ paper (was 0.012)
             momentum=0.95,
             norm_mode="row_col",  # Best per paper (27.64 PPL)
             rms_scaling=True,  # Enable shape scaling sqrt(m/n)
