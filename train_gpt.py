@@ -1234,14 +1234,20 @@ class NorMuonAndAdam:
             state_P = mproj(m_raw / thres_r, v_chunk, steps=5)
 
             # Adaptive threshold adjustment (keep ~subspace_ratio dimensions as sharp)
-            k = int(p_cfg.subspace_ratio * min(chunk_shape[-2], chunk_shape[-1])) + 1
-            k = min(k, min(chunk_shape[-2], chunk_shape[-1]) - 1)
-            if state_P.norm() > math.sqrt(k):
-                p_state["subspace_threshold_ratio"] = min(
-                    1.0, p_state["subspace_threshold_ratio"] * 1.05
+            # OPTIMIZATION: Only update every 100 steps to prevent torch.compile cache thrashing
+            step = self.iter if hasattr(self, "iter") else 0
+            if step % 100 == 0:
+                k = (
+                    int(p_cfg.subspace_ratio * min(chunk_shape[-2], chunk_shape[-1]))
+                    + 1
                 )
-            else:
-                p_state["subspace_threshold_ratio"] *= 0.95
+                k = min(k, min(chunk_shape[-2], chunk_shape[-1]) - 1)
+                if state_P.norm() > math.sqrt(k):
+                    p_state["subspace_threshold_ratio"] = min(
+                        1.0, p_state["subspace_threshold_ratio"] * 1.05
+                    )
+                else:
+                    p_state["subspace_threshold_ratio"] *= 0.95
 
             # Compute flat-direction LR amplification
             lr_times = self._get_lr_ratio(p_cfg.lr_ratio, p_cfg.flat_warmup)
