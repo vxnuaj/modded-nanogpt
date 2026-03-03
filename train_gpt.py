@@ -2214,7 +2214,7 @@ class TrainingManager:
         )
 
         muon_plus_defaults = dict(
-            lr=0.02,  # Lower LR with normalized updates (was 0.023 for NorMuon)
+            lr=0.015,  # Lower LR with normalized updates (was 0.023 for NorMuon)
             momentum=0.95,
             norm_mode="col_row",  # Best per paper (27.64 PPL)
             rms_scaling=True,  # Enable shape scaling sqrt(m/n)
