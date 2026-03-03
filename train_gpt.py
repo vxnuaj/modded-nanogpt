@@ -438,9 +438,17 @@ def lite_process(
     # Compute flat subspace projection: P_flat = I - P^T @ P
     # For efficiency, we work with the complement directly
     n = m_ns.size(-1)
-    P_flat_smooth = (
-        torch.eye(n, dtype=m_ns.dtype, device=m_ns.device) - state_P.t() @ state_P
-    )
+    # Handle both 2D and 3D tensors (batch of matrices)
+    if state_P.ndim == 2:
+        P_flat_smooth = (
+            torch.eye(n, dtype=m_ns.dtype, device=m_ns.device) - state_P.t() @ state_P
+        )
+    else:
+        # 3D tensor: (batch, n, n) - use transpose(-2, -1)
+        P_flat_smooth = (
+            torch.eye(n, dtype=m_ns.dtype, device=m_ns.device)
+            - state_P.transpose(-2, -1) @ state_P
+        )
 
     # Compute Hessian damping term (orthogonalized gradient)
     hessian_damping = polar_express(
@@ -1233,10 +1241,18 @@ class NorMuonAndAdam:
 
             # Compute flat-direction weight decay component
             n = v_chunk.size(-1)
-            P_flat_smooth = (
-                torch.eye(n, dtype=v_chunk.dtype, device=v_chunk.device)
-                - state_P.t() @ state_P
-            )
+            # Handle both 2D and 3D tensors (batch of matrices)
+            if state_P.ndim == 2:
+                P_flat_smooth = (
+                    torch.eye(n, dtype=v_chunk.dtype, device=v_chunk.device)
+                    - state_P.t() @ state_P
+                )
+            else:
+                # 3D tensor: (batch, n, n) - use transpose(-2, -1)
+                P_flat_smooth = (
+                    torch.eye(n, dtype=v_chunk.dtype, device=v_chunk.device)
+                    - state_P.transpose(-2, -1) @ state_P
+                )
             flat_data_wd = (
                 param.data.view(p_cfg.reshape)[
                     rank * p_cfg.chunk_size : (rank + 1) * p_cfg.chunk_size
@@ -2272,6 +2288,7 @@ class Hyperparameters:
     val_loss_every: int = (
         250  # every how many steps to evaluate val loss? 0 for only at the end
     )
+    test_steps: int = 0  # if > 0, run only this many steps (for testing)
     save_checkpoint: bool = False
     # bigram hash embedding
     bigram_vocab_size: int = 50304 * 5
