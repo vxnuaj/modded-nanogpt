@@ -2220,11 +2220,11 @@ class TrainingManager:
         )
 
         muon_plus_defaults = dict(
-            lr=0.025,  # Slightly higher than 0.023 (paper: 0.02-0.04)
+            lr=0.03,  # Paper optimal range (0.02-0.04)
             momentum=0.95,
             norm_mode="col_row",  # Best per paper (27.64 PPL)
             rms_scaling=True,  # Enable shape scaling sqrt(m/n)
-            weight_decay=1.2,
+            weight_decay=0.1,  # Paper default (was 1.2 for NorMuon)
         )
 
         self.optimizer = MuonPlusAndAdam(
