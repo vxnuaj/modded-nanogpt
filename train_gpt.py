@@ -329,6 +329,7 @@ def polar_express(
     return X
 
 
+@torch.compile(dynamic=False, fullgraph=True)
 @torch.no_grad()
 def mproj(m: torch.Tensor, msign_m: torch.Tensor, steps: int) -> torch.Tensor:
     """LITE subspace projection: project onto sharp subspace (eigenval > threshold).
@@ -409,6 +410,7 @@ def rank_v(
     return new_top_ratio, new_lower_ratio, result
 
 
+@torch.compile(dynamic=False, fullgraph=True)
 @torch.no_grad()
 def lite_process(
     m_ns: torch.Tensor,
@@ -417,6 +419,7 @@ def lite_process(
     beta1: float,
     beta2: float,
     lr_times: float,
+    eye_n: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """LITE flat-direction amplification and update computation.
 
@@ -431,6 +434,7 @@ def lite_process(
         beta1: Base Hessian damping coefficient
         beta2: Flat-direction damping boost (beta2 >= beta1)
         lr_times: Flat-direction LR amplification factor (chi >= 1)
+        eye_n: Cached identity matrix (if None, will be created)
 
     Returns:
         LITE-amplified update tensor
@@ -439,28 +443,41 @@ def lite_process(
     # For efficiency, we work with the complement directly
     n = m_ns.size(-1)
     # Handle both 2D and 3D tensors (batch of matrices)
-    if state_P.ndim == 2:
-        P_flat_smooth = (
-            torch.eye(n, dtype=m_ns.dtype, device=m_ns.device) - state_P.t() @ state_P
-        )
+    if eye_n is not None:
+        # Use cached identity matrix (fast path)
+        if state_P.ndim == 2:
+            P_flat_smooth = eye_n - state_P.t() @ state_P
+        else:
+            P_flat_smooth = eye_n - state_P.transpose(-2, -1) @ state_P
     else:
-        # 3D tensor: (batch, n, n) - use transpose(-2, -1)
-        P_flat_smooth = (
-            torch.eye(n, dtype=m_ns.dtype, device=m_ns.device)
-            - state_P.transpose(-2, -1) @ state_P
-        )
-
-    # Compute Hessian damping term (orthogonalized gradient)
-    hessian_damping = polar_express(
-        grad, torch.zeros_like(grad), torch.tensor(0.0), split_baddbmm=False
-    )
-
-    # Apply Hessian damping in flat directions
-    hessian_damping_flat = hessian_damping @ P_flat_smooth
+        # Create identity matrix (slow path, fallback)
+        if state_P.ndim == 2:
+            P_flat_smooth = (
+                torch.eye(n, dtype=m_ns.dtype, device=m_ns.device)
+                - state_P.t() @ state_P
+            )
+        else:
+            P_flat_smooth = (
+                torch.eye(n, dtype=m_ns.dtype, device=m_ns.device)
+                - state_P.transpose(-2, -1) @ state_P
+            )
 
     # Assemble LITE update:
     # update = m_ns + beta1*damping + (beta2-beta1)*damping_flat + (lr_times-1)*update@P_flat
-    update = m_ns + beta1 * hessian_damping + (beta2 - beta1) * hessian_damping_flat
+    # OPTIMIZATION: Skip hessian_damping orthogonalization when beta1=beta2=0 (common case)
+    if beta1 > 0 or beta2 > 0:
+        # Compute Hessian damping term (orthogonalized gradient) - EXPENSIVE
+        hessian_damping = polar_express(
+            grad, torch.zeros_like(grad), torch.tensor(0.0), split_baddbmm=False
+        )
+        # Apply Hessian damping in flat directions
+        hessian_damping_flat = hessian_damping @ P_flat_smooth
+        update = m_ns + beta1 * hessian_damping + (beta2 - beta1) * hessian_damping_flat
+    else:
+        # Fast path: no hessian damping needed
+        update = m_ns
+
+    # Flat-direction amplification
     update = update + (lr_times - 1) * update @ P_flat_smooth
 
     return update
@@ -842,14 +859,18 @@ class NorMuonAndAdam:
                     # Adaptive threshold ratio for sharp/flat classification
                     m, n = chunk_shape[-2], chunk_shape[-1]
                     subspace_threshold_ratio = 1.0 / math.sqrt(min(m, n))
+                    # Cache identity matrix for P_flat computation
+                    eye_n = torch.eye(n, dtype=torch.bfloat16, device=param.device)
                 else:
                     subspace_threshold_ratio = None
+                    eye_n = None
 
                 self.param_states[param] = dict(
                     momentum_buffer=momentum_buffer,
                     second_momentum_buffer=second_momentum_buffer,
                     mantissa=mantissa,
                     subspace_threshold_ratio=subspace_threshold_ratio,
+                    eye_n=eye_n,
                 )
 
     # -----------------------------------
@@ -1237,22 +1258,18 @@ class NorMuonAndAdam:
             )
 
             # LITE flat-direction amplification
-            v_chunk = lite_process(v_chunk, grad_chunk, state_P, beta1, beta2, lr_times)
+            v_chunk = lite_process(
+                v_chunk, grad_chunk, state_P, beta1, beta2, lr_times, p_state["eye_n"]
+            )
 
             # Compute flat-direction weight decay component
-            n = v_chunk.size(-1)
-            # Handle both 2D and 3D tensors (batch of matrices)
+            # Use cached identity matrix from p_state
+            eye_n = p_state["eye_n"]
             if state_P.ndim == 2:
-                P_flat_smooth = (
-                    torch.eye(n, dtype=v_chunk.dtype, device=v_chunk.device)
-                    - state_P.t() @ state_P
-                )
+                P_flat_smooth = eye_n - state_P.t() @ state_P
             else:
                 # 3D tensor: (batch, n, n) - use transpose(-2, -1)
-                P_flat_smooth = (
-                    torch.eye(n, dtype=v_chunk.dtype, device=v_chunk.device)
-                    - state_P.transpose(-2, -1) @ state_P
-                )
+                P_flat_smooth = eye_n - state_P.transpose(-2, -1) @ state_P
             flat_data_wd = (
                 param.data.view(p_cfg.reshape)[
                     rank * p_cfg.chunk_size : (rank + 1) * p_cfg.chunk_size
