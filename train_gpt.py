@@ -599,7 +599,7 @@ class MuonPlusAndAdam:
             # Note: Shape scaling is applied in _muon_plus_update, not here
             # This matches the paper's update rule: W = W - η * √(m/n) * O_t
 
-            # Per-matrix LR multipliers for MLP c_proj (2x LR on odd indices)
+            # Per-matrix LR multipliers for MLP c_proj (1.5x LR on odd indices)
             per_matrix_lr_mul = None
             if label == "mlp_bank":
                 rank = dist.get_rank() if dist.is_initialized() else 0
@@ -608,7 +608,7 @@ class MuonPlusAndAdam:
                 for i in range(chunk_size):
                     global_idx = start_idx + i
                     is_c_proj = global_idx % 2 == 1
-                    per_matrix_lr_mul.append(2.0 if is_c_proj else 1.0)
+                    per_matrix_lr_mul.append(1.5 if is_c_proj else 1.0)
 
             p_cfg = ParamConfig(
                 label=label,
@@ -999,11 +999,12 @@ class MuonPlusAndAdam:
         # 4. NEW: Post-polar normalization (Muon+ core)
         u = apply_post_polar_norm(u, p_cfg.norm_mode, eps=1e-7)
 
-        # 5. Shape scaling: √(m/n) applied to update (not LR)
-        # This matches paper: W = W - η * √(m/n) * O_t
+        # 5. Shape scaling: compute multiplier (will apply to LR, not update)
+        # Reference Muon+ applies √(m/n) to LR: adjusted_lr = lr * √(m/n)
+        shape_scale = 1.0
         if p_cfg.rms_scaling:
             m, n = u.shape[-2], u.shape[-1]
-            u = u * math.sqrt(max(m, n) / min(m, n))
+            shape_scale = math.sqrt(max(m, n) / min(m, n))
 
         # 6. Get parameter slice for update
         param_view = param.data.view(p_cfg.reshape)
@@ -1013,14 +1014,19 @@ class MuonPlusAndAdam:
         eff_wd = p_cfg.wd_mul * p_cfg.weight_decay * p_cfg.lr
         p_slice.mul_(1 - eff_wd)
 
-        # 8. Parameter update with per-matrix LR multipliers
+        # 8. Parameter update with shape scaling applied to LR (reference style)
         if p_cfg.per_matrix_lr_mul is not None:
             # MLP bank: different LR per matrix
             for mat_idx in range(p_cfg.chunk_size):
-                eff_lr = p_cfg.lr_mul * p_cfg.per_matrix_lr_mul[mat_idx] * p_cfg.lr
+                eff_lr = (
+                    p_cfg.lr_mul
+                    * p_cfg.per_matrix_lr_mul[mat_idx]
+                    * p_cfg.lr
+                    * shape_scale
+                )
                 p_slice[mat_idx].add_(u[mat_idx], alpha=-eff_lr)
         else:
-            eff_lr = p_cfg.lr_mul * p_cfg.lr
+            eff_lr = p_cfg.lr_mul * p_cfg.lr * shape_scale
             p_slice.add_(u, alpha=-eff_lr)
 
         return p_slice
