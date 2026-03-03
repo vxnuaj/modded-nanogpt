@@ -599,16 +599,9 @@ class MuonPlusAndAdam:
             # Note: Shape scaling is applied in _muon_plus_update, not here
             # This matches the paper's update rule: W = W - η * √(m/n) * O_t
 
-            # Per-matrix LR multipliers for MLP c_proj (2x LR on odd indices)
+            # Per-matrix LR multipliers DISABLED for Muon+ (paper uses global LR only)
+            # Previous: c_proj got 2.0x, now all matrices use 1.0x for purity
             per_matrix_lr_mul = None
-            if label == "mlp_bank":
-                rank = dist.get_rank() if dist.is_initialized() else 0
-                start_idx = rank * chunk_size
-                per_matrix_lr_mul = []
-                for i in range(chunk_size):
-                    global_idx = start_idx + i
-                    is_c_proj = global_idx % 2 == 1
-                    per_matrix_lr_mul.append(2.0 if is_c_proj else 1.0)
 
             p_cfg = ParamConfig(
                 label=label,
@@ -2065,18 +2058,9 @@ def get_muon_momentum(
     momentum_min=0.85,
     momentum_max=0.95,
 ):
-    # warmup phase: linearly increase momentum from min to max
-    # cooldown phase: linearly decrease momentum from max to min
-    momentum_cd_start = training_schedule.total_steps - muon_cooldown_steps
-    if step < muon_warmup_steps:
-        frac = step / muon_warmup_steps
-        momentum = momentum_min + frac * (momentum_max - momentum_min)
-    elif step > momentum_cd_start:
-        frac = (step - momentum_cd_start) / muon_cooldown_steps
-        momentum = momentum_max - frac * (momentum_max - momentum_min)
-    else:
-        momentum = momentum_max
-    return momentum
+    # Fixed momentum for Muon+ (paper uses fixed μ=0.95, no schedule)
+    # Momentum schedule removed based on Grok recommendation for better convergence
+    return momentum_max
 
 
 class TrainingManager:
@@ -2214,9 +2198,9 @@ class TrainingManager:
         )
 
         muon_plus_defaults = dict(
-            lr=0.012,  # Lower LR with normalized updates (was 0.023 for NorMuon)
+            lr=0.01,  # Paper's sweet spot for GPT-Small (sweep [0.003-0.04])
             momentum=0.95,
-            norm_mode="row_col",  # Best per paper (27.64 PPL)
+            norm_mode="col_row",  # Best per paper (tied with row_col, 27.64 PPL)
             rms_scaling=True,  # Enable shape scaling sqrt(m/n)
             weight_decay=0.1,  # Paper default (was 1.2 for NorMuon)
         )
