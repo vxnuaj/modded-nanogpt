@@ -992,34 +992,15 @@ class MuonPlusAndAdam:
         chunk_shape = grad_chunk.shape
         p_state = self.param_states[param]
 
-        # 1. Momentum accumulation (FP32 for precision)
-        buf = p_state["momentum_buffer"]
-        buf.mul_(p_cfg.momentum).add_(grad_chunk.float(), alpha=1 - p_cfg.momentum)
-
-        # 2. Nesterov momentum: g = g + μ * buf
-        g = grad_chunk.float().add(buf, alpha=p_cfg.momentum)
-
-        # 3. Polar Express orthogonalization
-        # Reshape for batch processing if needed
-        if g.ndim > 2:
-            g_reshaped = g.view(-1, g.shape[-1])
-            buf_reshaped = p_state["momentum_buffer"].view(-1, g.shape[-1])
-        else:
-            g_reshaped = g
-            buf_reshaped = p_state["momentum_buffer"]
-
-        # Fused Nesterov momentum + Polar Express orthogonalization
+        # Polar Express handles momentum internally (fused for efficiency)
+        # It updates momentum_buffer in-place and returns orthogonalized Nesterov momentum
         is_large_matrix = chunk_shape[-2] > 1024
         u = polar_express(
-            g_reshaped,
-            buf_reshaped,
+            grad_chunk.float(),
+            p_state["momentum_buffer"],
             torch.tensor(p_cfg.momentum, dtype=torch.float32, device="cpu"),
             split_baddbmm=is_large_matrix,
         )
-
-        # Reshape back
-        if g.ndim > 2:
-            u = u.view(g.shape)
 
         # 4. NEW: Post-polar normalization (Muon+ core)
         u = apply_post_polar_norm(u, p_cfg.norm_mode, eps=1e-7)
